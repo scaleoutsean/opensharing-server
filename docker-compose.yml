@@ -1,0 +1,98 @@
+services:
+  dex:
+    image: docker.io/dexidp/dex:latest
+    container_name: opensharing-dex
+    ports:
+      - "5556:5556"
+    volumes:
+      - ./dex-config/config.yaml:/etc/dex/config.yaml:ro
+    command: ["dex", "serve", "/etc/dex/config.yaml"]
+    networks:
+      - opensharing
+
+  opensharing-app:
+    image: ghcr.io/dexidp/example-app:latest
+    container_name: opensharing-token-app
+    depends_on:
+      - dex
+    ports:
+      - "5555:5555"
+    entrypoint:
+      - example-app
+      - --issuer
+      - http://dex:5556/dex
+      - --listen
+      - http://0.0.0.0:5555
+      - --redirect-uri
+      - http://dex:5555/callback
+      - --client-id
+      - opensharing-app
+      - --client-secret
+      - ZXhhbXBsZS1hcHAtc2VjcmV0
+    networks:
+      - opensharing
+
+  s3:
+    image: ghcr.io/versity/versitygw:v1.7.0
+    container_name: opensharing-s3
+    ports:
+      - "27070:27070" # s3 
+      - "27071:27071" # admin
+      - "27080:27080" # webui
+    environment:
+      ROOT_ACCESS_KEY: ${S3_ACCESS_KEY:-admin}
+      ROOT_SECRET_KEY: ${S3_SECRET_KEY:-secret}
+      VGW_BACKEND: posix
+      VGW_BACKEND_ARGS: /data
+      # VGW_VERSIONING_DIR: /data-versioning
+      # S3
+      VGW_PORT: ":27070"
+      # ADMIN 
+      VGW_ADMIN_PORT: ":27071"      
+      VGW_WEBUI_ADMIN_GATEWAYS: "http://localhost:27071"
+      # UI
+      VGW_WEBUI_PORT: ":27080"
+      VGW_WEBUI_GATEWAYS: "http://localhost:27070"
+      # CORS
+      VGW_CORS_ALLOW_ORIGIN: "*"
+    volumes:
+      - ${DATA_PATH:-./data}:/data
+    restart: unless-stopped
+    networks:
+      - opensharing
+
+  api:
+    build: .
+    container_name: opensharing-api
+    depends_on:
+      - dex
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8000:8000"
+    environment:
+      HTTP_ADDR: ":8000"
+      REGISTRY_PATH: /app/config/shares.yaml
+      AUTH_REQUIRED: ${AUTH_REQUIRED:-true}
+      OIDC_ISSUER_URL: http://dex:5556/dex
+      OIDC_AUDIENCE: opensharing-app
+      S3_INTERNAL_ENDPOINT: ${S3_INTERNAL_ENDPOINT:-http://s3:27070}
+      S3_EXTERNAL_ENDPOINT: ${S3_EXTERNAL_ENDPOINT:-http://192.168.1.13:27070}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-admin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-secret}
+      S3_REGION: us-east-1
+      S3_CA_BUNDLE: ${S3_CA_BUNDLE:-}
+      S3_TLS_VERIFY: ${S3_TLS_VERIFY:-true}
+      S3_REQUEST_TIMEOUT: ${S3_REQUEST_TIMEOUT:-10s}
+      PRESIGN_TTL: 1h
+      DISCOVERY_ENABLED: ${DISCOVERY_ENABLED:-true}
+      DISCOVERY_TTL: 1m
+    volumes:
+      - ./config:/app/config:ro
+      - ./certs/storagegrid-ca.crt:/app/certs/storagegrid-ca.crt:ro      
+    networks:
+      - opensharing
+
+networks:
+  opensharing:
+    driver: bridge

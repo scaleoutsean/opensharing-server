@@ -1,0 +1,44 @@
+tenants:
+  - name: default
+    shares:
+      - name: report-share
+        recipients:
+          oidcEmails:
+            - alice@example.com
+          oidcSubjects: []
+          oidcGroups:
+            - beegfs-admins
+        schemas:
+          - name: report-schema
+            tables:
+              - name: report_table
+                format: parquet
+                storageLocation: s3://default-bucket/tables/
+                singleObject: test-object.parquet
+                schemaString: '{"type":"struct","fields":[{"name":"A","type":"long","nullable":true,"metadata":{}},{"name":"B","type":"long","nullable":true,"metadata":{}},{"name":"C","type":"long","nullable":true,"metadata":{}},{"name":"D","type":"long","nullable":true,"metadata":{}}]}'
+      - name: analytics-share
+        recipients:
+          oidcEmails:
+            - alice@example.com
+          oidcSubjects: []
+          oidcGroups:
+            - beegfs-admins
+        schemas:
+          - name: analytics-schema
+            tables:  
+              - name: iot_silver_table
+                format: parquet
+                storageLocation: s3://default-bucket/tables/iot_silver_table/
+                schemaString: '{"type":"struct","fields":[{"name":"device_id","type":"string","nullable":true,"metadata":{}},{"name":"Temperature","type":"double","nullable":true,"metadata":{}},{"name":"target","type":"double","nullable":true,"metadata":{}}]}'
+      - name: files-share
+        recipients:
+          oidcEmails:
+            - bob@example.com
+          oidcSubjects: []
+        schemas:
+          - name: log-schema
+            volumes:
+              - name: docs-dir
+                storageLocation: s3://default-bucket/volumes/
+                include: ["*.log"]
+                exclude: [".internal/*"]

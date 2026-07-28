@@ -1,0 +1,30 @@
+issuer: http://dex:5556/dex
+expiry:
+  idTokens: "720h" # Make tokens valid for 30 days
+storage:
+  type: sqlite3
+web:
+  http: 0.0.0.0:5556
+staticClients:
+  - id: opensharing-app
+    redirectURIs:
+      - 'http://dex:5555/callback' # normally we'd use opensharing-app:5555, but we're running on the same host ("DEX" added to /etc/hosts) in Docker Compose
+      - 'http://localhost:5555/callback'
+    name: 'OpenSharing App'
+    secret: ZXhhbXBsZS1hcHAtc2VjcmV0
+enablePasswordDB: true
+staticPasswords:
+  - email: "alice@example.com"
+    hash: "$2a$12$oxefvMKf7kFRgP/Kjug.HewB0441TkaIt6xSuDskLeqz8nH8hTJJS" # password: 123123123
+    username: "alice"
+    userID: "123123123"
+    groups:
+      - beegfs-admins
+      - opensharing-admins
+      - analytics-users
+  - email: "bob@example.com"
+    hash: "$2a$12$oxefvMKf7kFRgP/Kjug.HewB0441TkaIt6xSuDskLeqz8nH8hTJJS" # password: 123123123
+    username: "bob"
+    userID: "456456456"
+    groups:
+      - analytics-users
