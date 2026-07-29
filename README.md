@@ -27,7 +27,7 @@ Data paths:
 - S3 bucket/object discovery and table/volume listings are live S3-compatible API calls
 - S3 object reads are direct, using presigned URLs built from the configured external S3 API endpoint
 
-Other OpenSharing objects aren't implemented yet because I haven't needed them. The Versity S3 Gateway does not support [AWS STS (Assume Role)](https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRole.html), so I'm not in a hurry to implement it just for StorageGRID because I haven't head of anyone who needs OpenSharing with STS support. 
+Other OpenSharing objects aren't implemented yet because I haven't needed them. The Versity S3 Gateway does not support [AWS STS (Assume Role)](https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRole.html), so I'm not in a hurry to implement it just for StorageGRID because I haven't heard of anyone who needs OpenSharing with STS support (likely complicated, as OpenSharing and S3 each need OAuth2).
 
 ## Use cases 
 
