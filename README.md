@@ -7,13 +7,14 @@ An opinionated OpenSharing server for NetApp StorageGRID and Versity S3 Gateway 
 The OpenSharing Server is Go-based and distributed as a free binary release (Linux on AMD64 and ARM64, Windows) with a Docker Compose stack for evaluation, testing and development (although nothing prevents its use in production, you probably shouldn't).
 
 - Tested object stores: 
-  - Versity S3 Gateway 1.7.0 and 1.6.0
+  - Versity S3 Gateway 1.7.0 (with S3/RDMA as of [8bd73a4](https://github.com/versity/versitygw/commit/8bd73a45eea3bce090e89e8fc97ad2ccfdf1b935) from early August 2026) and 1.6.0
   - StorageGRID 12.1, 12.0 
 
 ## Features
 
 - Bearer token authorization
 - Supports **named** Tables and Volumes (files)
+- Supports S3/RDMA (only with Versity S3 Gateway with S3/RDMA)
 - List objects with include/exclude pattern for objects in OpenSharing Volumes
 - List sharing candidates limited to Volume candidates, i.e. buckets
 - Live reload of sharing configuration
@@ -26,12 +27,13 @@ Data paths:
 - OpenSharing API metadata and policy checks are handled by OpenSharing Go service
 - S3 bucket/object discovery and table/volume listings are live S3-compatible API calls
 - S3 object reads are direct, using presigned URLs built from the configured external S3 API endpoint
+  - When S3/RDMA-enabled Versity S3 Gateway is serving data over an RoCEv2-enabled network, S3/RDMA-capable clients can GET objects over RDMA
 
 Other OpenSharing objects aren't implemented yet because I haven't needed them. The Versity S3 Gateway does not support [AWS STS (Assume Role)](https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRole.html), so I'm not in a hurry to implement it just for StorageGRID because I haven't heard of anyone who needs OpenSharing with STS support (likely complicated, as OpenSharing and S3 each need OAuth2).
 
 ## Use cases 
 
-- NetApp E-Series with Versity Gateway: securely share data stored on E-Series volumes without copying it to NAS or external S3 or managing complex services
+- NetApp E-Series with Versity S3 Gateway: securely share data stored on E-Series volumes without copying it to NAS or external S3 or managing complex services
 - NetApp StorageGRID: OpenSharing access to Tables, Volumes (buckets) for zero-copy analytics, machine learning, and general file sharing
 
 Currently neither StorageGRID nor E-Series have an official solution for OpenSharing. This server is the first to offer a working implementation and it enables early testing and development using standard, open APIs.
@@ -88,7 +90,9 @@ $ export AUTH_REQUIRED=false \
 $ ./opensharing-server
 ```
 
-`HTTP_ADDR` controls bind address and port. The default is `:8000` (all interfaces). For local-only CLI testing, prefer `127.0.0.1:8000`.
+`HTTP_ADDR` controls bind address and port. The default is `:8000` (all interfaces). For local-only CLI testing, prefer `127.0.0.1:8000`. 
+
+**NOTE:** For "experimental" S3/RDMA with VGW RDMA, see the section at the bottom. There's no standard S3/RDMA client, so this isn't included in "standard" evaluation.
 
 Windows version (PowerShell 7 terminal):
 
@@ -123,6 +127,8 @@ File and directory edits and changes:
 - `./config/shares.yaml` defines Tables and Volumes shares. If you don't use data from `./sample-data/`, modify this file to suit your bucket name and table/file name(s) 
 
 Confirm containers that you expect to be running are all running. After that, skip to Evaluation section. 
+
+**NOTE:** Compose stack isn't enabled for S3/RDMA because VGW with S3/RDMA hasn't been released yet and it is expected to change rapidly. If you evaluate VGW with S3/RDMA, run OpenSharing from the CLI (see instructions at the bottom of this page).
 
 ### (Optional) reverse HTTPS proxy (API gateway) 
 
@@ -460,6 +466,90 @@ As mentioned at the top, this OpenSharing Server doesn't apply Delta transaction
 ```sh
 ./.venv/bin/python3 ./test-client.py --profile profile.share --ca-bundle ./certs/storagegrid-ca.crt [--insecure-tls]
 ```
+
+### S3/RDMA with Versity Gateway 
+
+OpenSharing server works with Versity S3 Gateway with S3/RDMA as of [this commit](https://github.com/versity/versitygw/commit/8bd73a45eea3bce090e89e8fc97ad2ccfdf1b935):
+
+- Make sure VGW with S3/RDMA is fully functional by running tests appropriate for your environment (see [this](https://github.com/versity/versitygw/wiki/RDMA-User)) using their S3/RDMA test client
+- Start OpenSharing server from teh CLI with the correct Versity S3 Gateway's RDMA IP address and port (example: `S3_EXTERNAL_RDMA_ENDPOINT=http://192.168.1.13:19100`)
+
+Popular S3 client libraries do not support S3/RDMA, so this can't be tested with `curl` - you need a client that can use S3/RDMA.
+
+GET uses information from standard S3 `HeadObject` to allocate a correctly sized registered buffer. This requires `X-Amz-Rdma-Reply` and verification of `X-Amz-Rdma-Bytes-Transferred`.
+
+Volume request:
+
+```http
+POST /shares/{share}/schemas/{schema}/volumes/{volume}/files/rdma-download
+Authorization: Bearer <OpenSharing token>
+Content-Type: application/json
+
+{"file_path":"example.log","rdma_token":"<opaque token>"}
+```
+
+Table request:
+
+```http
+POST /shares/{share}/schemas/{schema}/tables/{table}/files/rdma-download
+Authorization: Bearer <OpenSharing token>
+Content-Type: application/json
+
+{"file_id":"tables/test-object.parquet","rdma_token":"<opaque token>"}
+```
+
+Successful response:
+
+```json
+{
+  "download_url": "https://vgwrdma.example/bucket/key?X-Amz-Algorithm=...",
+  "required_headers": {
+    "Host": "vgwrdma.example",
+    "X-Amz-Rdma-Token": "<opaque token>"
+  },
+  "size": 35274209
+}
+```
+
+The client should send `X-Amz-Rdma-Token` with the GET; the HTTP library derives `Host` from `download_url`.
+
+Your workflow would look similar to this (I use sample data for tables from this repo):
+- Using standard S3, get OpenSharing tables
+- Your client needs to be able to GET objects over RDMA. My Versity `vgwrdma` test used the `rdma` bucket and PUT `cuobjtest-object` there, so I first try that from my S3/RDMA client. You can try any objects from VGW.
+- If that works, you can use the steps above to get Tables and Volumes as explained above
+
+```sh
+$ curl -s http://127.0.0.1:8000/shares/report-share/schemas/report-schema/tables | jq
+{
+  "items": [
+    {
+      "name": "report_table",
+      "schema": "report-schema",
+      "share": "report-share",
+      "shareId": "share:default:report-share",
+      "location": "s3://default-bucket/tables/",
+      "accessModes": [
+        "url"
+      ],
+      "id": "table:default:report-share:report-schema:report_table"
+    }
+  ]
+}
+
+$ python3 test-rdma-client.py direct-get --s3-endpoint http://192.168.1.11:7070 --region us-east-1 --bucket rdma --key cuobjtest-object
+SUCCESS: RDMA GET transferred 4194304 bytes
+SHA256:  4fde9d0466110d580b80deceabb869ba25676288f780a7fe0623bae687e49c6a
+Target:  rdma-download.bin
+
+$ python3 test-rdma-client.py opensharing-table --memory host --share report-share --schema report-schema --table report_table --file-id tables/test-object.parquet
+SUCCESS: RDMA GET transferred 3220 bytes
+SHA256:  a40a1a024c1ff5313f8549d3174201f65dd55c50f45712a94d9a4857524b152b
+Target:  rdma-table-download.parquet
+```
+
+In this last step, notice `--memory host`. This is the S3/RDMA approach for users without GPU hardware, meant for compatibility testing (mentioned [here](https://scaleoutsean.github.io/2026/08/08/versity-s3-rdma-with-netapp-eseries.html#appendix-a-vgw-s3rdma-backed-by-e-series-nvmeroce) as well).
+
+My S3/RDMA client wraps the host-memory client built with "`make cuobjtest-host`". You can use "`make cuobjtest-gpu`" and wrap that if you have GPU hardware. See the [Versity S3/RDMA User Guide](https://github.com/versity/versitygw/wiki/RDMA-User#building) for more.
 
 ## Contributions
 

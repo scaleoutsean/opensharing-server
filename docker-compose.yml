@@ -78,6 +78,8 @@ services:
       OIDC_AUDIENCE: opensharing-app
       S3_INTERNAL_ENDPOINT: ${S3_INTERNAL_ENDPOINT:-http://s3:27070}
       S3_EXTERNAL_ENDPOINT: ${S3_EXTERNAL_ENDPOINT:-http://192.168.1.13:27070}
+      # Optional vgwrdma S3 HTTP URL, including its HTTP port (not VGW_RDMA_PORT). Ex: S3_EXTERNAL_RDMA_ENDPOINT=http://192.168.1.13:19100
+      S3_EXTERNAL_RDMA_ENDPOINT: ${S3_EXTERNAL_RDMA_ENDPOINT:-}
       S3_ACCESS_KEY: ${S3_ACCESS_KEY:-admin}
       S3_SECRET_KEY: ${S3_SECRET_KEY:-secret}
       S3_REGION: us-east-1
