@@ -30,6 +30,9 @@ tenants:
                 format: parquet
                 storageLocation: s3://default-bucket/tables/iot_silver_table/
                 schemaString: '{"type":"struct","fields":[{"name":"device_id","type":"string","nullable":true,"metadata":{}},{"name":"Temperature","type":"double","nullable":true,"metadata":{}},{"name":"target","type":"double","nullable":true,"metadata":{}}]}'
+              - name: iceberg_demo_table
+                format: iceberg
+                storageLocation: s3://example/warehouse/01a065f4-62da-7dc2-8b59-0f770e1cda4f/
       - name: files-share
         recipients:
           oidcEmails:

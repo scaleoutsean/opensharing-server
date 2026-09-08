@@ -6,30 +6,33 @@ An opinionated OpenSharing server for NetApp StorageGRID and Versity S3 Gateway 
 
 The OpenSharing Server is Go-based and distributed as a free binary release (Linux on AMD64 and ARM64, Windows) with a Docker Compose stack for evaluation, testing and development (although nothing prevents its use in production, you probably shouldn't).
 
-- Tested object stores: 
-  - Versity S3 Gateway 1.7.0 (with S3/RDMA as of [8bd73a4](https://github.com/versity/versitygw/commit/8bd73a45eea3bce090e89e8fc97ad2ccfdf1b935) from early August 2026) and 1.6.0
-  - StorageGRID 12.1, 12.0 
+Tested object stores: 
+
+- Versity S3 Gateway 1.8.0, 1.7.0 (with S3/RDMA as of [8bd73a4](https://github.com/versity/versitygw/commit/8bd73a45eea3bce090e89e8fc97ad2ccfdf1b935) from early August 2026) and 1.6.0
+- StorageGRID 12.1, 12.0 
 
 ## Features
 
 - Bearer token authorization
-- Supports **named** Tables and Volumes (files)
-- Supports S3/RDMA (only with Versity S3 Gateway with S3/RDMA)
+- Supports **named** Delta Tables and Volumes (files)
+- Provides metadata discovery-based sharing for Iceberg Tables
 - List objects with include/exclude pattern for objects in OpenSharing Volumes
 - List sharing candidates limited to Volume candidates, i.e. buckets
 - Live reload of sharing configuration
-
-OpenSharing server currently does not apply Delta transaction semantics to OpenSharing Tables - they're assumed to be static. 
-It is something that could be done by a separate application (especially with Versity S3 Gateway, where [such applications](https://scaleoutsean.github.io/2026/06/16/netapp-eseries-iot-compaction-opensharing.html) can run on the same Linux host) or OpenSharing Server itself.
-
+- STS AssumeRole (**only** StorageGRID 12.1/12.0 and **only** for Iceberg tables)
+- Supports S3/RDMA (**only** with Versity S3 Gateway with S3/RDMA)
+ 
 Data paths:
 
 - OpenSharing API metadata and policy checks are handled by OpenSharing Go service
 - S3 bucket/object discovery and table/volume listings are live S3-compatible API calls
-- S3 object reads are direct, using presigned URLs built from the configured external S3 API endpoint
-  - When S3/RDMA-enabled Versity S3 Gateway is serving data over an RoCEv2-enabled network, S3/RDMA-capable clients can GET objects over RDMA
+  - Iceberg tables: OpenSharing server discovers the "current" `metadata.json` itself by reading raw S3 listing (version-hint and object sort) - it has no real catalog, and it does not act as Iceberg catalog client. That is convenient for read-only clients and static data where no Iceberg catalog service is available or reachable, such as edge sites, static table repositories, etc. If you have an Iceberg catalog, use it directly.
+- S3 object reads are direct
+  - Presigned URLs are built by OpenSharing server credentials from the configured external S3 API endpoint
+  - Temporary STS AssumeRole credentials obtained by server or dedicated trusted account for STS (Iceberg tables only)
+- When S3/RDMA-enabled Versity S3 Gateway is serving data over an RoCEv2-enabled network, S3/RDMA-capable clients can GET objects over RDMA
 
-Other OpenSharing objects aren't implemented yet because I haven't needed them. The Versity S3 Gateway does not support [AWS STS (Assume Role)](https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRole.html), so I'm not in a hurry to implement it just for StorageGRID because I haven't heard of anyone who needs OpenSharing with STS support (likely complicated, as OpenSharing and S3 each need OAuth2).
+Other OpenSharing objects aren't implemented yet because I haven't needed them. The Versity S3 Gateway does not support [AWS STS AssumeRole](https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRole.html) so that is currently supported only with StorageGRID.
 
 ## Use cases 
 
@@ -71,11 +74,15 @@ There's a number of places where one can screw up, so at least initially, it's r
 
 If you want to make the Web UI or S3 API inaccessible to others, change `docker-compose.yaml` to limit access to `localhost` clients.
 
-### CLI with own S3 service
+### CLI with own S3 service ("static" or "dynamic")
 
 This approach is simple: authentication is disabled, so you can immediately focus on using OpenSharing server. 
 
-Edit `./config/shares.yaml` (including `storageLocation` which has the S3 bucket detail) if you want to use own data, or create the same bucket and upload the sample data from `./sample-data/` to avoid editing `shares.yaml`.
+There are two variants: "static" (presigned URLs, both StorageGRID and Versity S3 Gateway) and "dynamic" (STS AssumeRole, limited to StorageGRID and recommended for Iceberg tables - see further below).
+
+#### Static (all non-Iceberg resources)
+
+Edit `./config/shares.yaml` (including `storageLocation` which has the S3 bucket detail) if you want to use own data, or create the same bucket and upload the sample data from `./sample-data/` to avoid editing `shares.yaml`. **Remove** Iceberg shares as they won't work in this mode anyway.
 
 ```sh
 $ export AUTH_REQUIRED=false \
@@ -111,6 +118,39 @@ Note that there's no built-in online help because OpenSharing server is made to 
 
 If the server starts as expected, skip to Evaluation section. 
 
+#### Dynamic (only for Iceberg Tables/STS AssumeRole)
+
+**NOTE:** There are no "sample" Iceberg tables because these are dynamic and can't be just "uploaded". However, you need to create some and edit `./config/shares.yaml` - there is one Iceberg share there that serves as an example. See an API and client walk-through further below.
+
+Below is an example STS AssumeRole-capable CLI startup command for OpenSharing with Iceberg tables.
+
+- `STS_PROVIDER` should be `assume_role`, which StorageGRID can do. Use HTTPS endpoints to avoid unencrypted authentication
+- `STS_ACCESS_KEY` and `STS_SECRET_KEY` of the trusted user who can request STS AssumeRole credentials. These can be the same as the user running OpenSharing server (who creates pre-signed URLs), but may be different for extra separation of roles
+- `STS_SESSION_DURATION` defaults to 1 hour. Temporary credentials expire after 3600 seconds (default), and so clients should `loadTable` to refresh, or increase this to over 3600 for all clients
+
+```sh
+$ AUTH_REQUIRED=false \
+HTTP_ADDR=127.0.0.1:8000 \
+REGISTRY_PATH=config/shares.yaml \
+S3_INTERNAL_ENDPOINT=http://192.168.1.211:10080 \ # OpenSharing to StorageGRID, like `USE_PRIVATELINK_ENDPOINT` in Snowflake
+S3_EXTERNAL_ENDPOINT=http://192.168.1.211:10080 \ # OpenSharing client to StorageGRID; use TLS to protect S3 credentials, data
+S3_ACCESS_KEY="bla" \
+S3_SECRET_KEY="bla bla" \
+S3_REGION=us-east-1 \
+S3_TLS_VERIFY=false \                    # leave this, in case you switch to HTTPS later
+STS_PROVIDER=assume_role \               # use this for STS AssumeRole with StorageGRID
+STS_ENDPOINT=http://192.168.1.211:10080 \# StorageGRID Tenant API endpoint; use TLS
+STS_ROLE_ARN="urn:sgws:identity::55295525968323305569:group/AssumedRole" \  # Tenant group for STS 
+STS_SESSION_DURATION=7200 \              # default: 3600s
+STS_ACCESS_KEY="blah" \                  # note that this can be the same "main" S3 key used by OpenSharing server, but you can use another
+STS_SECRET_KEY="blah blah" \
+STS_REGION=us-east-1 \
+STS_TLS_VERIFY=false \                   # use TLS if you need to protect S3 credentials and presigned URLs
+./opensharing-server
+```
+
+If the server starts as expected, skip to Evaluation section. 
+
 ### Docker Compose stack 
 
 Authentication/authorization may be disabled in docker-compose.yaml (`AUTH_REQUIRED=false`):
@@ -128,7 +168,9 @@ File and directory edits and changes:
 
 Confirm containers that you expect to be running are all running. After that, skip to Evaluation section. 
 
-**NOTE:** Compose stack isn't enabled for S3/RDMA because VGW with S3/RDMA hasn't been released yet and it is expected to change rapidly. If you evaluate VGW with S3/RDMA, run OpenSharing from the CLI (see instructions at the bottom of this page).
+**NOTES:** 
+- Compose stack isn't enabled for S3/RDMA because VGW with S3/RDMA hasn't been released yet and it is expected to change rapidly. If you evaluate VGW with S3/RDMA, run OpenSharing from the CLI (see instructions at the bottom of this page).
+- If you want to run OpenSharing for **Iceberg tables** from Docker, update `docker-compose` with variables from the CLI example for Iceberg/AssumeRole. STS AssumeRole must be enabled for that.
 
 ### (Optional) reverse HTTPS proxy (API gateway) 
 
@@ -138,11 +180,13 @@ This isn't included because there's too much variety in everyone's preferred sta
 
 ## Evaluation 
 
-Users running in CLI mode don't need to provide JWT token in requests because authentication is disabled.
+Users running in the CLI mode don't need to provide JWT token in requests because authentication is disabled.
 
 The steps below assume no authentication (and omit authentication headers in `curl` requests).
 
 ### Upload or create sample data and configure shares for OpenSharing server 
+
+**NOTE:** do not use this for Iceberg tables. They can't be simply uploaded to the bucket. See the API walk-through further below.
 
 `./sample-data` has several small files that can be used in evaluation. We'll use MinIO client (mc) which you can download [here](https://github.com/scaleoutsean/minio-client) or MinIO, but you may also upload the sample files using the Web UI in Versity S3 Gateway or NetApp StorageGRID Tenant UI.
 
@@ -153,6 +197,7 @@ mc alias set -h # hint: mc alias set s3 ${S3_EXTERNAL_ENDPOINT} ${S3_ACCESS_KEY}
 mc mb s3://sample-bucket # using alias 's3' to create bucket 'sample-bucket'
 mc cp -r sample-data/tables s3://sample-bucket/ # copy sample tables data to sample-bucket
 mc cp -r sample-data/volumes s3://sample-bucket/ # copy sample volumes data to sample-bucket
+# sample-data/storagegrid-log.csv is a sampel file to *create* Iceberg tables in datalake; do not copy to S3
 ```
 
 My bucket with files uploaded:
@@ -465,6 +510,222 @@ As mentioned at the top, this OpenSharing Server doesn't apply Delta transaction
 
 ```sh
 ./.venv/bin/python3 ./test-client.py --profile profile.share --ca-bundle ./certs/storagegrid-ca.crt [--insecure-tls]
+```
+
+### Iceberg Tables
+
+As mentioned above, there are no "sample" tables for Iceberg. How you can prepare similar data:
+
+- Get StorageGRID audit logs and convert them to JSONLD using [SGAC](https://github.com/scaleoutsean/storagegrid-audit-analysis) or use own tool
+- Drop audit log lines other than where requests (`ATYP`, access type) are `SPUT`, `SGET`, `SDEL`, `SUPD` to make table shorter and simpler
+- Import JSON data to Iceberg v2 lakehouse using the schema below (not all fields were imported)
+- Wharehouse `demo`, namespace `demo`, table `audit_log`, StorageGRID bucket `example`
+  - Screenshots of how this looks like in a lakehouse are available [here](https://scaleoutsean.github.io/2026/09/03/lakekeeper-iceberg-compression-snapshots.html)
+- And then in `./config/shares.yaml`, I have `schemas` equal to `analytics-schema`, `tables` is `iceberg_demo_table`, `type` is `iceberg` and `storageLocation` is `s3://example/warehouse/01a065f4-62da-7dc2-8b59-0f770e1cda4f/` (you'll have to change both the bucket name and path). To cut the likelihood of typos, you can reuse what can be reused, and edit `shares.yaml` for the rest.
+
+To save time, I've exported that table to CSV (`./samples/storagegrid-log.csv`) and you may import it to a fresh table from an Iceberg client or catalog UI.
+
+```python
+schema = Schema(
+    NestedField(1, "Timestamp", TimestamptzType(), required=True),
+    NestedField(2, "RSLT", StringType(), required=True),
+    NestedField(3, "TIME", LongType(), required=True),
+    NestedField(4, "SAIP", StringType(), required=True),
+    NestedField(5, "TLIP", StringType(), required=True),
+    NestedField(6, "S3AI", StringType(), required=True),
+    NestedField(7, "SACC", StringType(), required=True),
+    NestedField(8, "S3AK", StringType(), required=True),
+    NestedField(9, "S3BK", StringType(), required=True),
+    NestedField(10, "S3KY", StringType(), required=True),
+    NestedField(11, "CSIZ", LongType(), required=True),
+    NestedField(12, "ATYP", StringType(), required=True),
+    NestedField(13, "AMID", StringType(), required=True),
+)
+```
+
+Query shares:
+
+```sh
+curl -s "http://127.0.0.1:8000/iceberg/v1/config?warehouse=analytics-share" | jq
+```
+
+Response:
+
+```json
+{
+  "defaults": {},
+  "overrides": {
+    "prefix": "analytics-share"
+  },
+  "endpoints": [
+    "GET /v1/{prefix}/namespaces",
+    "GET /v1/{prefix}/namespaces/{namespace}",
+    "GET /v1/{prefix}/namespaces/{namespace}/tables",
+    "GET /v1/{prefix}/namespaces/{namespace}/tables/{table}",
+    "POST /v1/{prefix}/namespaces/{namespace}/tables/{table}/metrics"
+  ]
+}
+```
+
+Namespaces:
+
+```sh
+curl -s "http://127.0.0.1:8000/iceberg/v1/analytics-share/namespaces" | jq
+```
+
+Response:
+```json
+{
+  "namespaces": [
+    [
+      "analytics-schema"
+    ]
+  ]
+}
+```
+
+Tables (we have just that audit log table):
+
+```sh
+curl -s "http://127.0.0.1:8000/iceberg/v1/analytics-share/namespaces/analytics-schema/tables" | jq
+```
+
+Response:
+
+```json
+{
+  "identifiers": [
+    {
+      "namespace": [
+        "analytics-schema"
+      ],
+      "name": "iceberg_demo_table"
+    }
+  ]
+}
+```
+
+**NOTE:** response will contain STS AssumeRole **credentials and session token**. Get details of a particular table:
+
+```sh
+curl -s "http://127.0.0.1:8000/iceberg/v1/analytics-share/namespaces/analytics-schema/tables/iceberg_demo_table" | jq
+```
+
+Example response with a trimmed JSON schema dictionary and redacted credentials:
+
+```sh
+{
+  "metadata-location": "s3://example/warehouse/01a065f4-62da-7dc2-8b59-0f770e1cda4f/metadata/00001-01a065f4-6a9b-7a80-9b8f-f2d2df25d4a0.gz.metadata.json",
+  "metadata": {
+    "format-version": 2,
+    "table-uuid": "01a065f4-62da-7dc2-8b59-0f770e1cda4f",
+    "location": "s3://example/warehouse/01a065f4-62da-7dc2-8b59-0f770e1cda4f",
+    "last-sequence-number": 1,
+    "last-updated-ms": 1788416911903,
+    "last-column-id": 13,
+    "schemas": [
+      {
+        "schema-id": 0,
+        "type": "struct",
+        "fields": [
+          {
+            "id": 1,
+            "name": "Timestamp",
+            "required": true,
+            "type": "timestamptz"
+          }
+    ],
+    "current-schema-id": 0,
+    "partition-specs": [
+      {
+        "spec-id": 0,
+        "fields": []
+      }
+    ],
+    "default-spec-id": 0,
+    "last-partition-id": 999,
+    "current-snapshot-id": 5859332520718683361,
+    "snapshot-log": [
+      {
+        "snapshot-id": 5859332520718683361,
+        "timestamp-ms": 1788416911903
+      }
+    ],
+    "metadata-log": [
+      {
+        "metadata-file": "s3://example/warehouse/01a065f4-62da-7dc2-8b59-0f770e1cda4f/metadata/00000-01a065f4-62f7-7513-b4d0-065b2cc9e396.gz.metadata.json",
+        "timestamp-ms": 1788416910096
+      }
+    ],
+    "sort-orders": [
+      {
+        "order-id": 0,
+        "fields": []
+      }
+    ],
+    "default-sort-order-id": 0,
+    "refs": {
+      "main": {
+        "snapshot-id": 5859332520718683361,
+        "type": "branch"
+      }
+    },
+    "snapshots": [
+      {
+        "snapshot-id": 5859332520718683361,
+        "sequence-number": 1,
+        "timestamp-ms": 1788416911903,
+        "manifest-list": "s3://example/warehouse/01a065f4-62da-7dc2-8b59-0f770e1cda4f/metadata/snap-5859332520718683361-0-4483b496-1308-4a03-a95f-d1ff741d3031.avro",
+        "summary": {
+          "operation": "append",
+          "total-delete-files": "0",
+          "total-files-size": "5713",
+          "total-records": "61",
+          "added-files-size": "5713",
+          "added-records": "61",
+          "total-position-deletes": "0",
+          "added-data-files": "1",
+          "total-data-files": "1",
+          "total-equality-deletes": "0"
+        },
+        "schema-id": 0
+      }
+    ]
+  },
+  "config": {
+    "s3.access-key-id": "blah",
+    "s3.endpoint": "http://192.168.1.211:10080",
+    "s3.path-style-access": "true",
+    "s3.region": "us-east-1",
+    "s3.secret-access-key": "blah-blah",
+    "s3.session-token": "blah-blah-blah"
+  }
+}
+```
+
+To connect from an Iceberg client such as Trino:
+
+- `catalog-url` is `http://{OPENSHARING_SERVER}:8000/iceberg`
+- `warehouse` is `analytics-share`
+- `namespace` is `analytics-schema`
+- `table` is `iceberg_demo_table`
+- `s3-endpoint` is the StorageGRID S3 API for data reads (`S3_EXTERNAL_ENDPOINT` for client access)
+
+Register the Trino catalog and use it:
+
+```sql
+CREATE CATALOG {catalog} USING iceberg
+WITH (
+    "iceberg.catalog.type" = 'rest',
+    "iceberg.rest-catalog.uri" = '{catalog_url}',
+    "iceberg.rest-catalog.warehouse" = '{warehouse}',
+    "iceberg.rest-catalog.security" = 'NONE',
+    "iceberg.rest-catalog.vended-credentials-enabled" = 'true',
+    "s3.region" = '{S3_REGION}',
+    "s3.path-style-access" = 'true',
+    "s3.endpoint" = '{s3_endpoint}',
+    "fs.native-s3.enabled" = 'true'
+)
 ```
 
 ### S3/RDMA with Versity Gateway 
