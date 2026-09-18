@@ -8,8 +8,8 @@ The OpenSharing Server is Go-based and distributed as a free binary release (Lin
 
 Tested object stores: 
 
-- Versity S3 Gateway 1.8.0, 1.7.0 (with S3/RDMA as of [8bd73a4](https://github.com/versity/versitygw/commit/8bd73a45eea3bce090e89e8fc97ad2ccfdf1b935) from early August 2026) and 1.6.0
-- StorageGRID 12.1, 12.0 
+- Versity S3 Gateway 1.8.0 (also with post-release commits (up to Sep 9, 2026) required for STS AssumeRoleWithWebIdentity/Iceberg, via its standalone IAM/OIDC service), 1.7.0 (with S3/RDMA as of [8bd73a4](https://github.com/versity/versitygw/commit/8bd73a45eea3bce090e89e8fc97ad2ccfdf1b935) from early August 2026) and 1.6.0
+- StorageGRID 12.1, 12.0 (also required for STS AssumeRole/Iceberg)
 
 ## Features
 
@@ -19,7 +19,9 @@ Tested object stores:
 - List objects with include/exclude pattern for objects in OpenSharing Volumes
 - List sharing candidates limited to Volume candidates, i.e. buckets
 - Live reload of sharing configuration
-- STS AssumeRole (**only** StorageGRID 12.1/12.0 and **only** for Iceberg tables)
+- Vended STS credentials for Iceberg tables, via two interchangeable providers (see [Dynamic (only for Iceberg Tables/STS-vended credentials)](#dynamic-only-for-iceberg-tablessts-vended-credentials) below):
+  - StorageGRID 12.0/12.1: classic **AssumeRole**
+  - Versity S3 Gateway 1.8.0+: **AssumeRoleWithWebIdentity**, backed by VGW's own standalone IAM/OIDC service
 - Supports S3/RDMA (**only** with Versity S3 Gateway with S3/RDMA)
  
 Data paths:
@@ -29,10 +31,10 @@ Data paths:
   - Iceberg tables: OpenSharing server discovers the "current" `metadata.json` itself by reading raw S3 listing (version-hint and object sort) - it has no real catalog, and it does not act as Iceberg catalog client. That is convenient for read-only clients and static data where no Iceberg catalog service is available or reachable, such as edge sites, static table repositories, etc. If you have an Iceberg catalog, use it directly.
 - S3 object reads are direct
   - Presigned URLs are built by OpenSharing server credentials from the configured external S3 API endpoint
-  - Temporary STS AssumeRole credentials obtained by server or dedicated trusted account for STS (Iceberg tables only)
+  - Iceberg tables only: temporary vended credentials, from one of two STS providers - StorageGRID's classic AssumeRole (a separate, static trusted account requests credentials on the caller's behalf) or Versity S3 Gateway's AssumeRoleWithWebIdentity (the caller's own OIDC bearer token is exchanged directly for credentials, no separate trusted account needed)
 - When S3/RDMA-enabled Versity S3 Gateway is serving data over an RoCEv2-enabled network, S3/RDMA-capable clients can GET objects over RDMA
 
-Other OpenSharing objects aren't implemented yet because I haven't needed them. The Versity S3 Gateway does not support [AWS STS AssumeRole](https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRole.html) so that is currently supported only with StorageGRID.
+Other OpenSharing objects aren't implemented yet because I haven't needed them. Versity S3 Gateway does not support classic [AWS STS AssumeRole](https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRole.html), but as of 1.8.0 it supports [AssumeRoleWithWebIdentity](https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRoleWithWebIdentity.html) through its own standalone IAM/OIDC service, which OpenSharing also supports for Iceberg tables (see [Dynamic (only for Iceberg Tables/STS-vended credentials)](#dynamic-only-for-iceberg-tablessts-vended-credentials) below).
 
 ## Use cases 
 
@@ -68,7 +70,7 @@ If you are concerned about that, either:
 
 Built-in Versity S3 Gateway has a Web UI at `http://127.0.0.1:27080/`. If you want to upload objects from the Web UI, use that. Feel free to customize or hide behind a reverse HTTPS proxy.
 
-There's a number of places where one can screw up, so at least initially, it's recommended to use it as-is or disable it if you don't want to make it accessible. These are the details you need to get right when accessing the Web UI.
+There's a number of places where one can screw up, so at least initially, it's recommended to use it as-is or disable the Web UI if you don't want to make it accessible. These are the details you need to get right when accessing the Web UI.
 
 ![VGW Web UI](/images/s3_vgw_web_ui_settings.png)
 
@@ -78,7 +80,7 @@ If you want to make the Web UI or S3 API inaccessible to others, change `docker-
 
 This approach is simple: authentication is disabled, so you can immediately focus on using OpenSharing server. 
 
-There are two variants: "static" (presigned URLs, both StorageGRID and Versity S3 Gateway) and "dynamic" (STS AssumeRole, limited to StorageGRID and recommended for Iceberg tables - see further below).
+There are two variants: "static" (presigned URLs, both StorageGRID and Versity S3 Gateway) and "dynamic" (vended STS credentials for Iceberg tables, via either StorageGRID AssumeRole or Versity S3 Gateway AssumeRoleWithWebIdentity - see further below).
 
 #### Static (all non-Iceberg resources)
 
@@ -118,9 +120,20 @@ Note that there's no built-in online help because OpenSharing server is made to 
 
 If the server starts as expected, skip to Evaluation section. 
 
-#### Dynamic (only for Iceberg Tables/STS AssumeRole)
+#### Dynamic (only for Iceberg Tables/STS-vended credentials)
 
 **NOTE:** There are no "sample" Iceberg tables because these are dynamic and can't be just "uploaded". However, you need to create some and edit `./config/shares.yaml` - there is one Iceberg share there that serves as an example. See an API and client walk-through further below.
+
+Iceberg tables' `loadTable` response includes short-lived, request-scoped S3 credentials instead of a presigned URL, because Iceberg clients read manifest/data files directly from the URIs in `metadata.json`. OpenSharing supports two interchangeable providers for vending those credentials - pick the one that matches your backend. Both build the *same* read-only, bucket+prefix-scoped session policy for each `loadTable` call; only how the caller is authenticated to STS differs.
+
+| | StorageGRID: `assume_role` | Versity S3 Gateway 1.8.0+: `assume_role_web_identity` |
+|---|---|---|
+| STS API | classic [AssumeRole](https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRole.html) | [AssumeRoleWithWebIdentity](https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRoleWithWebIdentity.html) |
+| Who calls STS | OpenSharing server, using its own trusted static credentials (`STS_ACCESS_KEY`/`STS_SECRET_KEY`) | OpenSharing server, forwarding the *caller's own* OIDC bearer token as the web identity token |
+| `AUTH_REQUIRED` | can be `false` (no caller token needed) | **must** be `true` - there's no caller token to forward otherwise |
+| Where STS lives | StorageGRID Tenant API itself | VGW's separate `versitygw iam` standalone IAM/OIDC service (VGW's normal S3 API doesn't do STS) |
+
+##### StorageGRID: STS AssumeRole
 
 Below is an example STS AssumeRole-capable CLI startup command for OpenSharing with Iceberg tables.
 
@@ -149,6 +162,54 @@ STS_TLS_VERIFY=false \                   # use TLS if you need to protect S3 cre
 ./opensharing-server
 ```
 
+##### Versity S3 Gateway 1.8.0+: STS AssumeRoleWithWebIdentity
+
+VGW's own S3 gateway process has no STS endpoint of its own. Instead, 1.8.0+ ships a separate `versitygw iam` **standalone IAM/OIDC service** that: (a) exposes an AWS-compatible IAM/STS API (`aws iam`/`aws sts` work against it directly) for `AssumeRoleWithWebIdentity`, and (b) can be linked to one or more VGW S3 gateway processes over a private endpoint (unix socket, or mTLS-only TCP) via `--iam-standalone-endpoint`, so those gateways trust and honor the sessions it vends. This is VGW/IAM administration, independent of OpenSharing - see VGW's [Standalone-IAM](https://github.com/versity/versitygw/wiki/Standalone-IAM) and [Standalone-IAM-Setup](https://github.com/versity/versitygw/wiki/Standalone-IAM-Setup) wiki pages for the full reference; the one-time bootstrap looks like:
+
+```sh
+# 1. start the standalone IAM service (--dir for a file-backed store, or --vault-endpoint-url for Vault KV v2)
+versitygw --access admin --secret secret --port :7071 iam --dir ./data-iam \
+  --oidc-allow-insecure-transport   # only if your IdP is plain HTTP, e.g. a loopback-bound dev OIDC provider
+
+# 2. link your S3 gateway to it so vended sessions are actually honored for reads (private endpoint, e.g. a unix socket)
+versitygw --port :27070 --access admin --secret secret \
+  --iam-standalone-endpoint /path/to/iam-private.sock \
+  posix /data
+
+# 3. register your OIDC provider (dex, Keycloak, Okta, ...) and a role trusting it
+export AWS_ACCESS_KEY_ID=admin AWS_SECRET_ACCESS_KEY=secret AWS_DEFAULT_REGION=us-east-1
+aws --endpoint-url http://127.0.0.1:7071 iam create-open-id-connect-provider \
+  --url https://your-idp.example --client-id-list your-oidc-client-id
+aws --endpoint-url http://127.0.0.1:7071 iam create-role --role-name opensharing-web-identity \
+  --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Federated":"<OpenIDConnectProviderArn from above>"},"Action":"sts:AssumeRoleWithWebIdentity"}]}'
+aws --endpoint-url http://127.0.0.1:7071 iam put-role-policy --role-name opensharing-web-identity \
+  --policy-name base-s3-read --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:ListBucket","s3:GetObject"],"Resource":["arn:aws:s3:::*"]}]}'
+```
+
+Once that's in place, point OpenSharing at the standalone IAM's public port and enable real authentication - `AUTH_REQUIRED` **must** be `true` here, since the caller's own bearer token *is* the web identity token forwarded to STS:
+
+```sh
+$ AUTH_REQUIRED=true \
+HTTP_ADDR=127.0.0.1:8000 \
+REGISTRY_PATH=config/shares.yaml \
+OIDC_ISSUER_URL=https://your-idp.example \
+OIDC_AUDIENCE=your-oidc-client-id \
+S3_INTERNAL_ENDPOINT=http://192.168.1.211:27070 \
+S3_EXTERNAL_ENDPOINT=http://192.168.1.211:27070 \
+S3_ACCESS_KEY="admin" \
+S3_SECRET_KEY="secret" \
+S3_REGION=us-east-1 \
+STS_PROVIDER=assume_role_web_identity \  # use this for AssumeRoleWithWebIdentity with Versity S3 Gateway
+STS_ENDPOINT=http://192.168.1.211:7071 \ # the standalone IAM service's public port, not the S3 gateway's
+STS_ROLE_ARN="arn:aws:iam::000000000000:role/opensharing-web-identity" \
+STS_SESSION_DURATION=7200 \              # default: 3600s
+STS_REGION=us-east-1 \
+STS_TLS_VERIFY=false \                   # use TLS if you need to protect the IAM API and vended credentials
+./opensharing-server
+```
+
+Note there's no `STS_ACCESS_KEY`/`STS_SECRET_KEY` here - OpenSharing calls STS unsigned (`AssumeRoleWithWebIdentity` needs no caller credentials, only the bearer token), so those settings are ignored for this provider.
+
 If the server starts as expected, skip to Evaluation section. 
 
 ### Docker Compose stack 
@@ -170,7 +231,7 @@ Confirm containers that you expect to be running are all running. After that, sk
 
 **NOTES:** 
 - Compose stack isn't enabled for S3/RDMA because VGW with S3/RDMA hasn't been released yet and it is expected to change rapidly. If you evaluate VGW with S3/RDMA, run OpenSharing from the CLI (see instructions at the bottom of this page).
-- If you want to run OpenSharing for **Iceberg tables** from Docker, update `docker-compose` with variables from the CLI example for Iceberg/AssumeRole. STS AssumeRole must be enabled for that.
+- If you want to run OpenSharing for **Iceberg tables** from Docker, update `docker-compose.yaml` with the `STS_*` variables from one of the two CLI examples above (StorageGRID AssumeRole, or Versity S3 Gateway AssumeRoleWithWebIdentity) - see [Dynamic (only for Iceberg Tables/STS-vended credentials)](#dynamic-only-for-iceberg-tablessts-vended-credentials).
 
 ### (Optional) reverse HTTPS proxy (API gateway) 
 
@@ -321,7 +382,7 @@ In this case, my "volumes" is really just a path within a bucket, although it co
 Since there's no individual file/object, I need to get information on the "directory" (path):
 
 ```sh
-$ curl -s \
+curl -s \
   http://127.0.0.1:8000/shares/files-share/schemas/log-schema/volumes/docs-dir/files \
   jq
 ```
@@ -605,7 +666,7 @@ Response:
 }
 ```
 
-**NOTE:** response will contain STS AssumeRole **credentials and session token**. Get details of a particular table:
+**NOTE:** response will contain vended STS **credentials and session token** (from whichever provider is configured - StorageGRID AssumeRole or VGW AssumeRoleWithWebIdentity, see [Dynamic (only for Iceberg Tables/STS-vended credentials)](#dynamic-only-for-iceberg-tablessts-vended-credentials)). Get details of a particular table:
 
 ```sh
 curl -s "http://127.0.0.1:8000/iceberg/v1/analytics-share/namespaces/analytics-schema/tables/iceberg_demo_table" | jq
@@ -709,9 +770,9 @@ To connect from an Iceberg client such as Trino:
 - `warehouse` is `analytics-share`
 - `namespace` is `analytics-schema`
 - `table` is `iceberg_demo_table`
-- `s3-endpoint` is the StorageGRID S3 API for data reads (`S3_EXTERNAL_ENDPOINT` for client access)
+- `s3-endpoint` is the S3 API for data reads (`S3_EXTERNAL_ENDPOINT` for client access) - StorageGRID's or VGW's, depending on your STS provider
 
-Register the Trino catalog and use it:
+Register the Trino catalog and use it. With `STS_PROVIDER=assume_role` (StorageGRID), no bearer token is required, so `security = 'NONE'` works as-is:
 
 ```sql
 CREATE CATALOG {catalog} USING iceberg
@@ -720,6 +781,24 @@ WITH (
     "iceberg.rest-catalog.uri" = '{catalog_url}',
     "iceberg.rest-catalog.warehouse" = '{warehouse}',
     "iceberg.rest-catalog.security" = 'NONE',
+    "iceberg.rest-catalog.vended-credentials-enabled" = 'true',
+    "s3.region" = '{S3_REGION}',
+    "s3.path-style-access" = 'true',
+    "s3.endpoint" = '{s3_endpoint}',
+    "fs.native-s3.enabled" = 'true'
+)
+```
+
+With `STS_PROVIDER=assume_role_web_identity` (VGW), `AUTH_REQUIRED=true` is mandatory, so Trino must send the same bearer token as the `Authorization` header on every REST call. Trino's Iceberg REST connector supports a static OAuth2 token for this - swap `security` to `'OAUTH2'` and add `oauth2.token`:
+
+```sql
+CREATE CATALOG {catalog} USING iceberg
+WITH (
+    "iceberg.catalog.type" = 'rest',
+    "iceberg.rest-catalog.uri" = '{catalog_url}',
+    "iceberg.rest-catalog.warehouse" = '{warehouse}',
+    "iceberg.rest-catalog.security" = 'OAUTH2',
+    "iceberg.rest-catalog.oauth2.token" = '{your OIDC bearer token}',
     "iceberg.rest-catalog.vended-credentials-enabled" = 'true',
     "s3.region" = '{S3_REGION}',
     "s3.path-style-access" = 'true',

@@ -33,7 +33,8 @@ services:
       - opensharing
 
   s3:
-    image: ghcr.io/versity/versitygw:v1.7.0
+    # for AssumeRoleWithWebIdentity, build or use VGW with commits up to Sep 9 2026 or later
+    image: ghcr.io/versity/versitygw:v1.8.0
     container_name: opensharing-s3
     ports:
       - "27070:27070" # s3 

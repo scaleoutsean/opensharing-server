@@ -33,6 +33,9 @@ tenants:
               - name: iceberg_demo_table
                 format: iceberg
                 storageLocation: s3://example/warehouse/01a065f4-62da-7dc2-8b59-0f770e1cda4f/
+              - name: vgw_iceberg_demo_table
+                format: iceberg
+                storageLocation: s3://iceberg-vgw-bucket/warehouse/vgw_ns/vgw_demo_table/
       - name: files-share
         recipients:
           oidcEmails:
