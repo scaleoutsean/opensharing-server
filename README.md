@@ -232,7 +232,7 @@ Confirm containers that you expect to be running are all running. After that, sk
 **NOTES:** 
 - Compose stack isn't enabled for S3/RDMA because VGW with S3/RDMA hasn't been released yet and it is expected to change rapidly. If you evaluate VGW with S3/RDMA, run OpenSharing from the CLI (see instructions at the bottom of this page).
 - The normal stack's Dex issuer root (`http://dex:5556/dex/`) is not a UI and returns 404. Use `http://dex:5556/dex/.well-known/openid-configuration` as its health check. The browser token helper is `http://dex:5555/`.
-- For VGW **AssumeRoleWithWebIdentity**, use the dedicated stack instead of modifying the normal stack. Stop the normal stack first because both publish the same ports, then run:
+- For VGW **AssumeRoleWithWebIdentity**, use the dedicated stack instead of modifying the normal stack. Stop the normal stack first because both publish the same ports, then (until v1.9.0 comes out) clone latest VGW source to `./versitygw` and run:
 
 ```sh
 docker compose down
@@ -240,7 +240,7 @@ docker compose -f docker-compose.web-identity.yml up -d --build
 docker compose -f docker-compose.web-identity.yml ps -a
 ```
 
-The dedicated stack builds the newer VGW source in `./versitygw` because the released `v1.8.0` image does not contain the development OIDC flags needed for the plain-HTTP, private `dex` service. It runs standalone IAM on port 7071 and the S3 gateway as separate services linked through a shared private Unix socket. A one-shot bootstrap service idempotently creates the Dex OIDC provider, the `opensharing-web-identity` role, and its base read policy. OpenSharing is started with `AUTH_REQUIRED=true` and `STS_PROVIDER=assume_role_web_identity`.
+The included Compose stack **must build** the newer VGW from source in `./versitygw` because the released `v1.8.0` image does not contain the development OIDC flags needed for the plain-HTTP, private `dex` service. It runs standalone IAM on port 7071 and the S3 gateway as separate services linked through a shared private Unix socket. A one-shot bootstrap service idempotently creates the Dex OIDC provider, the `opensharing-web-identity` role, and its base read policy. OpenSharing is started with `AUTH_REQUIRED=true` and `STS_PROVIDER=assume_role_web_identity`.
 
 After `vgw-iam-bootstrap` has exited successfully, get a token from `http://dex:5555/` as described below. For an Iceberg client outside the Docker host, set `S3_EXTERNAL_ENDPOINT` to a host address reachable by that client before starting the stack; its default is `http://127.0.0.1:27070`.
 
@@ -302,7 +302,7 @@ You can also enable read-only mode for Versity S3 Gateway, which is useful for O
 
 If built-in authentication is enabled and OpenSharing server configured to use it:
 
-- go to http://dex:5555/ and click on `Login` (leave all fields empty)
+- go to http://dex:5555/ and click on `Login` (leave all fields empty in this step)
 - that will bounce you to http://dex:5556/dex/auth/local/login where you can login with Alice's credentials from `./dex-config/config.yaml` (email: alice@example.com, password: 123123123)
 - next, click on `Grant Access` and `Access Token` is the JWT aka Bearer Token you need to use to authenticate against OpenSharing service
 
