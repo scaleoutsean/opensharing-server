@@ -1,0 +1,161 @@
+services:
+  dex:
+    image: docker.io/dexidp/dex:latest
+    ports:
+      - "5556:5556"
+    volumes:
+      - ./dex-config/config.yaml:/etc/dex/config.yaml:ro
+    command: ["dex", "serve", "/etc/dex/config.yaml"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:5556/dex/.well-known/openid-configuration"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+    networks:
+      - opensharing
+
+  opensharing-app:
+    image: ghcr.io/dexidp/example-app:latest
+    depends_on:
+      dex:
+        condition: service_healthy
+    restart: on-failure
+    ports:
+      - "5555:5555"
+    entrypoint:
+      - example-app
+      - --issuer
+      - http://dex:5556/dex
+      - --listen
+      - http://0.0.0.0:5555
+      - --redirect-uri
+      - http://dex:5555/callback
+      - --client-id
+      - opensharing-app
+      - --client-secret
+      - ZXhhbXBsZS1hcHAtc2VjcmV0
+    networks:
+      - opensharing
+
+  vgw-iam:
+    build:
+      context: ./versitygw
+    image: opensharing-versitygw-web-identity:local
+    command:
+      - --region
+      - us-east-1
+      - --port
+      - :7071
+      - --access
+      - ${S3_ACCESS_KEY:-admin}
+      - --secret
+      - ${S3_SECRET_KEY:-secret}
+      - iam
+      - --dir
+      - /iam-data
+      - --oidc-allow-insecure-transport
+      - --oidc-allow-private-endpoints
+      - --private-ports
+      - /run/vgw-iam/iam.sock
+    depends_on:
+      dex:
+        condition: service_healthy
+    ports:
+      - "7071:7071"
+    volumes:
+      - ${VGW_IAM_DATA_PATH:-./vgw-standalone/data-iam}:/iam-data
+      - vgw-iam-socket:/run/vgw-iam
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:7071/"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    networks:
+      - opensharing
+
+  vgw-iam-bootstrap:
+    image: public.ecr.aws/aws-cli/aws-cli:latest
+    entrypoint: ["/bin/sh", "/bootstrap/bootstrap-vgw-web-identity.sh"]
+    environment:
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-admin}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-secret}
+      AWS_DEFAULT_REGION: us-east-1
+      IAM_ENDPOINT: http://vgw-iam:7071
+      OIDC_PROVIDER_URL: http://dex:5556/dex
+      OIDC_CLIENT_ID: opensharing-app
+      ROLE_NAME: opensharing-web-identity
+    depends_on:
+      vgw-iam:
+        condition: service_healthy
+    volumes:
+      - ./scripts/bootstrap-vgw-web-identity.sh:/bootstrap/bootstrap-vgw-web-identity.sh:ro
+    networks:
+      - opensharing
+
+  s3:
+    build:
+      context: ./versitygw
+    image: opensharing-versitygw-web-identity:local
+    command:
+      - --region
+      - us-east-1
+      - --port
+      - :27070
+      - --access
+      - ${S3_ACCESS_KEY:-admin}
+      - --secret
+      - ${S3_SECRET_KEY:-secret}
+      - --iam-standalone-endpoint
+      - /run/vgw-iam/iam.sock
+      - posix
+      - /data
+    depends_on:
+      vgw-iam:
+        condition: service_healthy
+    ports:
+      - "27070:27070"
+    volumes:
+      - ${DATA_PATH:-./data}:/data
+      - vgw-iam-socket:/run/vgw-iam
+    networks:
+      - opensharing
+
+  api:
+    build: .
+    depends_on:
+      dex:
+        condition: service_healthy
+      vgw-iam-bootstrap:
+        condition: service_completed_successfully
+      s3:
+        condition: service_started
+    ports:
+      - "8000:8000"
+    environment:
+      HTTP_ADDR: ":8000"
+      REGISTRY_PATH: /app/config/shares.yaml
+      AUTH_REQUIRED: "true"
+      OIDC_ISSUER_URL: http://dex:5556/dex
+      OIDC_AUDIENCE: opensharing-app
+      S3_INTERNAL_ENDPOINT: http://s3:27070
+      S3_EXTERNAL_ENDPOINT: ${S3_EXTERNAL_ENDPOINT:-http://127.0.0.1:27070}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-admin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-secret}
+      S3_REGION: us-east-1
+      S3_TLS_VERIFY: "true"
+      STS_PROVIDER: assume_role_web_identity
+      STS_ENDPOINT: http://vgw-iam:7071
+      STS_ROLE_ARN: arn:aws:iam::000000000000:role/opensharing-web-identity
+      STS_REGION: us-east-1
+      STS_TLS_VERIFY: "true"
+    volumes:
+      - ./config:/app/config:ro
+    networks:
+      - opensharing
+
+volumes:
+  vgw-iam-socket:
+
+networks:
+  opensharing:
+    driver: bridge

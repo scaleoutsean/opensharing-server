@@ -7,6 +7,11 @@ services:
     volumes:
       - ./dex-config/config.yaml:/etc/dex/config.yaml:ro
     command: ["dex", "serve", "/etc/dex/config.yaml"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:5556/dex/.well-known/openid-configuration"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
     networks:
       - opensharing
 
@@ -14,7 +19,9 @@ services:
     image: ghcr.io/dexidp/example-app:latest
     container_name: opensharing-token-app
     depends_on:
-      - dex
+      dex:
+        condition: service_healthy
+    restart: on-failure
     ports:
       - "5555:5555"
     entrypoint:
@@ -33,7 +40,8 @@ services:
       - opensharing
 
   s3:
-    # for AssumeRoleWithWebIdentity, build or use VGW with commits up to Sep 9 2026 or later
+    # For AssumeRoleWithWebIdentity, use docker-compose.web-identity.yml
+    # or at least build or use VGW with commits up to Sep 9 2026 or later
     image: ghcr.io/versity/versitygw:v1.8.0
     container_name: opensharing-s3
     ports:

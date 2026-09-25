@@ -8,7 +8,7 @@ The OpenSharing Server is Go-based and distributed as a free binary release (Lin
 
 Tested object stores: 
 
-- Versity S3 Gateway 1.8.0 (also with post-release commits (up to Sep 9, 2026) required for STS AssumeRoleWithWebIdentity/Iceberg, via its standalone IAM/OIDC service), 1.7.0 (with S3/RDMA as of [8bd73a4](https://github.com/versity/versitygw/commit/8bd73a45eea3bce090e89e8fc97ad2ccfdf1b935) from early August 2026) and 1.6.0
+- Versity S3 Gateway 1.8.0 (also with post-release commits (up to at least Sep 9, 2026) required for STS AssumeRoleWithWebIdentity/Iceberg, via its standalone IAM/OIDC service), 1.7.0 (with S3/RDMA as of [8bd73a4](https://github.com/versity/versitygw/commit/8bd73a45eea3bce090e89e8fc97ad2ccfdf1b935) from early August 2026) and 1.6.0
 - StorageGRID 12.1, 12.0 (also required for STS AssumeRole/Iceberg)
 
 ## Features
@@ -231,7 +231,18 @@ Confirm containers that you expect to be running are all running. After that, sk
 
 **NOTES:** 
 - Compose stack isn't enabled for S3/RDMA because VGW with S3/RDMA hasn't been released yet and it is expected to change rapidly. If you evaluate VGW with S3/RDMA, run OpenSharing from the CLI (see instructions at the bottom of this page).
-- If you want to run OpenSharing for **Iceberg tables** from Docker, update `docker-compose.yaml` with the `STS_*` variables from one of the two CLI examples above (StorageGRID AssumeRole, or Versity S3 Gateway AssumeRoleWithWebIdentity) - see [Dynamic (only for Iceberg Tables/STS-vended credentials)](#dynamic-only-for-iceberg-tablessts-vended-credentials).
+- The normal stack's Dex issuer root (`http://dex:5556/dex/`) is not a UI and returns 404. Use `http://dex:5556/dex/.well-known/openid-configuration` as its health check. The browser token helper is `http://dex:5555/`.
+- For VGW **AssumeRoleWithWebIdentity**, use the dedicated stack instead of modifying the normal stack. Stop the normal stack first because both publish the same ports, then run:
+
+```sh
+docker compose down
+docker compose -f docker-compose.web-identity.yml up -d --build
+docker compose -f docker-compose.web-identity.yml ps -a
+```
+
+The dedicated stack builds the newer VGW source in `./versitygw` because the released `v1.8.0` image does not contain the development OIDC flags needed for the plain-HTTP, private `dex` service. It runs standalone IAM on port 7071 and the S3 gateway as separate services linked through a shared private Unix socket. A one-shot bootstrap service idempotently creates the Dex OIDC provider, the `opensharing-web-identity` role, and its base read policy. OpenSharing is started with `AUTH_REQUIRED=true` and `STS_PROVIDER=assume_role_web_identity`.
+
+After `vgw-iam-bootstrap` has exited successfully, get a token from `http://dex:5555/` as described below. For an Iceberg client outside the Docker host, set `S3_EXTERNAL_ENDPOINT` to a host address reachable by that client before starting the stack; its default is `http://127.0.0.1:27070`.
 
 ### (Optional) reverse HTTPS proxy (API gateway) 
 
@@ -249,7 +260,7 @@ The steps below assume no authentication (and omit authentication headers in `cu
 
 **NOTE:** do not use this for Iceberg tables. They can't be simply uploaded to the bucket. See the API walk-through further below.
 
-`./sample-data` has several small files that can be used in evaluation. We'll use MinIO client (mc) which you can download [here](https://github.com/scaleoutsean/minio-client) or MinIO, but you may also upload the sample files using the Web UI in Versity S3 Gateway or NetApp StorageGRID Tenant UI.
+`./sample-data` has several small files that can be used in evaluation. We'll use MinIO client (mc) which you can download [here](https://github.com/scaleoutsean/minio-client) or from MinIO, but you may also upload the sample files using the Web UI in Versity S3 Gateway or NetApp StorageGRID Tenant UI.
 
 Configure your S3 CLI by following your client's configuration instructions.
 
@@ -292,21 +303,33 @@ You can also enable read-only mode for Versity S3 Gateway, which is useful for O
 If built-in authentication is enabled and OpenSharing server configured to use it:
 
 - go to http://dex:5555/ and click on `Login` (leave all fields empty)
-- that will bounce you to http://dex:5556/dex/auth/local/login where you can login with Alice's credentials from `./dex/config.yaml` (email: alice@example.com, password: 123123123)
+- that will bounce you to http://dex:5556/dex/auth/local/login where you can login with Alice's credentials from `./dex-config/config.yaml` (email: alice@example.com, password: 123123123)
 - next, click on `Grant Access` and `Access Token` is the JWT aka Bearer Token you need to use to authenticate against OpenSharing service
+
+Dex also displays an ID Token. In this local setup both tokens are signed JWTs with an issuer and audience accepted by OpenSharing, so either currently validates. Use the **Access Token** in the `Authorization` header: access tokens are intended for API authorization, while ID tokens are intended to tell the OAuth client about the authenticated user. VGW's AWS-compatible `AssumeRoleWithWebIdentity` flow can accept either token type when its OIDC claims satisfy the configured provider and role trust policy.
+
+Copy the token and export it in the shell running the evaluation commands:
+
+```sh
+export JWT='<Access Token from the Dex example app>'
+```
 
 Note that `./config/shares.yaml` may or may not authorize Alice to see certain OpenSharing share types.
 
 If your VM isn't named `dex` as suggested earlier, this probably won't work. You may restart OpenSharing server with authentication disabled in order to continue.
 
-We continue assuming authentication is disabled, so we won't pass the token in `curl` commands.
+The examples below omit authentication for the basic `AUTH_REQUIRED=false` setup. When authentication is enabled, add `-H "Authorization: Bearer ${JWT}"` to every protected OpenSharing API `curl` request. This is mandatory for the AssumeRoleWithWebIdentity Compose stack because it runs with `AUTH_REQUIRED=true` and forwards that same token to VGW STS. The `/healthz` request above does not require the header.
 
 ### Get shares and schemas
 
 Get all shares:
 
 ```sh
+# AUTH_REQUIRED=false
 curl -s http://127.0.0.1:8000/shares | jq
+
+# AUTH_REQUIRED=true, including the AssumeRoleWithWebIdentity stack
+curl -s -H "Authorization: Bearer ${JWT}" http://127.0.0.1:8000/shares | jq
 ```
 
 Using the sample configuration YAML, we expect to see three.
@@ -812,7 +835,7 @@ WITH (
 OpenSharing server works with Versity S3 Gateway with S3/RDMA as of [this commit](https://github.com/versity/versitygw/commit/8bd73a45eea3bce090e89e8fc97ad2ccfdf1b935):
 
 - Make sure VGW with S3/RDMA is fully functional by running tests appropriate for your environment (see [this](https://github.com/versity/versitygw/wiki/RDMA-User)) using their S3/RDMA test client
-- Start OpenSharing server from teh CLI with the correct Versity S3 Gateway's RDMA IP address and port (example: `S3_EXTERNAL_RDMA_ENDPOINT=http://192.168.1.13:19100`)
+- Start OpenSharing server from the CLI with the correct Versity S3 Gateway's RDMA IP address and port (example: `S3_EXTERNAL_RDMA_ENDPOINT=http://192.168.1.13:19100`)
 
 Popular S3 client libraries do not support S3/RDMA, so this can't be tested with `curl` - you need a client that can use S3/RDMA.
 
