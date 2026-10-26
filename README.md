@@ -8,7 +8,7 @@ The OpenSharing Server is Go-based and distributed as a free binary release (Lin
 
 Tested object stores: 
 
-- Versity S3 Gateway 1.8.0 (also with post-release commits (up to at least Sep 9, 2026) required for STS AssumeRoleWithWebIdentity/Iceberg, via its standalone IAM/OIDC service), 1.7.0 (with S3/RDMA as of [8bd73a4](https://github.com/versity/versitygw/commit/8bd73a45eea3bce090e89e8fc97ad2ccfdf1b935) from early August 2026) and 1.6.0
+- Versity S3 Gateway 1.8.0+ (also with post-release commits (up to at least Sep 9, 2026) required for STS AssumeRoleWithWebIdentity/Iceberg, via its standalone IAM/OIDC service), 1.7.0 (with S3/RDMA as of [8bd73a4](https://github.com/versity/versitygw/commit/8bd73a45eea3bce090e89e8fc97ad2ccfdf1b935) from early August 2026) and 1.6.0
 - StorageGRID 12.1, 12.0 (also required for STS AssumeRole/Iceberg)
 
 ## Features
